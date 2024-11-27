@@ -279,10 +279,7 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        let state = {
-            let guard = self.state.read();
-            Arc::clone(&guard)
-        };
+        let state = self.state.read();
         Ok(state.memtable.get(key))
     }
 
@@ -293,20 +290,29 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let state = {
-            let guard = self.state.read();
-            Arc::clone(&guard)
-        };
-        state.memtable.put(key, value)
+        let state = self.state.read();
+        match state.memtable.put(key, value) {
+            Ok(_) => {
+                if self.memtable_reaches_capacity_on_put(&state) {
+                    let state_lock = self.state_lock.lock();
+                    if self.memtable_reaches_capacity_on_put(&state) {
+                        drop(state);
+                        return self.force_freeze_memtable(&state_lock);
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn memtable_reaches_capacity_on_put(&self, state: &Arc<LsmStorageState>) -> bool {
+        state.memtable.approximate_size() >= self.options.target_sst_size
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        let state = {
-            let guard = self.state.read();
-            Arc::clone(&guard)
-        };
-        state.memtable.put(key, b"")
+        self.put(key, b"")
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -331,7 +337,18 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let mut guard = self.state.write();
+
+        // 这里对state进行clone，确保不直接对原state.memtable 修改，因为原state可能被其它线程使用，保证一致性
+        let mut state = guard.as_ref().clone();
+
+        let new_mem_table = Arc::new(MemTable::create(self.next_sst_id()));
+        let old_mem_table = std::mem::replace(&mut state.memtable, new_mem_table);
+        state.imm_memtables.insert(0, old_mem_table);
+
+        *guard = Arc::new(state);
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
