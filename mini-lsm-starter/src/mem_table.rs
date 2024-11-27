@@ -75,14 +75,7 @@ impl MemTable {
 
     /// Get a value by key.
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
-        self.map.get(key).and_then(|e| {
-            let value = e.value();
-            if value.is_empty() {
-                None
-            } else {
-                Some(value.clone())
-            }
-        })
+        self.map.get(key).map(|e| e.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
