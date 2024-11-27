@@ -345,14 +345,15 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
+        let new_mem_table = Arc::new(MemTable::create(self.next_sst_id()));
+
         let mut guard = self.state.write();
 
         // 这里对state进行clone，确保不直接对原state.memtable 修改，因为原state可能被其它线程使用，保证一致性
         let mut state = guard.as_ref().clone();
 
-        let new_mem_table = Arc::new(MemTable::create(self.next_sst_id()));
         let old_mem_table = std::mem::replace(&mut state.memtable, new_mem_table);
-        state.imm_memtables.insert(0, old_mem_table);
+        state.imm_memtables.insert(0, old_mem_table.clone());
 
         *guard = Arc::new(state);
 
